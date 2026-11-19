@@ -1,0 +1,515 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ============================================================
+// Auth / Users (Tasnime)
+// ============================================================
+
+enum ProfileType {
+  etudiant
+  professionnel
+}
+
+enum Role {
+  user
+  super_admin
+  manager_fnb
+  manager_coworking
+  sav
+  kds_chef
+  kds_equipier
+  kds_manager
+  pos_caissier
+  pos_manager
+}
+
+model User {
+  id                String      @id @default(uuid())
+  email             String      @unique
+  passwordHash      String?
+  fullName          String
+  profileType       ProfileType
+  role              Role        @default(user)
+  walletReferenceId String?     @unique
+  fcmToken          String?     // token Firebase Cloud Messaging pour les push
+  oauthProvider     String?
+  oauthId           String?
+  emailVerified     Boolean     @default(false)
+  isActive          Boolean     @default(true)
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  // Comptes tablette PIN (kds_equipier, kds_chef, pos_caissier)
+  pinHash      String?
+  deviceId     String?   @unique
+  enseigneId   String?
+  enseigne     Enseigne? @relation(fields: [enseigneId], references: [id])
+  pinFailedAttempts Int       @default(0)
+  pinLockedUntil    DateTime?
+
+  orders            Order[]
+  userEvents        UserEvent[]
+  reservations      Reservation[]
+  adminAuditLogs    AdminAuditLog[]
+  spaceBlocks  SpaceBlock[]
+
+  @@map("users")
+}
+
+// ============================================================
+// Orders / Cuisine / Menu (Tasnime)
+// ============================================================
+
+enum OrderStatus {
+  PANIER
+  RECUE
+  EN_PREPARATION
+  PRETE
+  CLOTUREE
+  ANNULEE
+}
+
+enum OrderChannel {
+  APP
+  COMPTOIR
+}
+
+model Enseigne {
+  id        String     @id @default(uuid())
+  nom       String
+  actif     Boolean    @default(true)
+  rushMode  Boolean    @default(false)
+  createdAt DateTime   @default(now())
+
+  menuItems       MenuItem[]
+  orders          Order[]
+  coworkingSpaces CoworkingSpace[]   // optionnel côté espace désormais — voir CoworkingSpace.enseigneId
+  staff           User[]
+  categories Category[]
+
+  @@map("enseignes")
+}
+
+model Order {
+  id                  String       @id @default(uuid())
+  userId              String?      // optionnel désormais (commandes comptoir sans compte)
+  user                User?        @relation(fields: [userId], references: [id])
+  enseigneId          String
+  enseigne            Enseigne     @relation(fields: [enseigneId], references: [id])
+  statut              OrderStatus  @default(PANIER)
+  channel             OrderChannel @default(APP)
+  cashierId           String?      // <-- nouveau : staff POS ayant créé la commande comptoir
+  modePaiement        String?      // <-- nouveau : "ESPECES" | "CARTE" | "WALLET"
+  walletReferenceId   String?
+  walletTransactionId String?
+  clientRequestId     String?      @unique  // <-- nouveau : dédoublonnage sync hors-ligne
+  qrToken             String?      @unique
+  creneauSouhaite     DateTime?    // heure de récupération souhaitée (optionnel, sinon "au plus vite")
+  qrScannedAt         DateTime?
+  totalPrix           Decimal      @db.Decimal(10, 2)
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+
+  items               OrderItem[]
+
+  @@map("orders")
+}
+
+model OrderItem {
+  id           String   @id @default(uuid())
+  orderId      String
+  order        Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  menuItemId   String
+  menuItem     MenuItem @relation(fields: [menuItemId], references: [id])
+  quantite     Int
+  prixUnitaire Decimal  @db.Decimal(10, 2)
+
+  @@map("order_items")
+}
+
+model UserEvent {
+  id         String   @id @default(uuid())
+  userId     String?
+  user       User?     @relation(fields: [userId], references: [id])
+  eventType  String
+  entityId   String?
+  metadata   Json?
+  context    Json?
+  occurredAt DateTime @default(now())
+
+  @@index([userId, eventType])
+  @@map("user_events")
+}
+
+// ============================================================
+// Coworking (Asma)
+// ============================================================
+
+enum SpaceBlockReason {
+  maintenance
+  travaux
+  reparation
+  evenement_interne
+  fermeture_externe
+  autre
+}
+
+enum SpaceType {
+  hot_desk
+  bureau_prive
+  salle_reunion
+  phone_booth
+  game_zone
+  rooftop
+  studio_photo
+  studio_podcast
+}
+
+enum ReservationStatus {
+  confirmed
+  cancelled
+  completed
+  no_show
+}
+
+enum PaymentMode {
+  wallet
+  subscription
+}
+
+enum DurationType {
+  half_day
+  full_day
+  multi_day
+}
+
+enum HalfDayPeriod {
+  morning
+  afternoon
+}
+
+enum PricingUnit {
+  hour
+  day
+  activity        // <-- AJOUTER : tarif variable (Game Zone, privatisation Rooftop...)
+}
+
+model CoworkingSpace {
+  id            String       @id @default(uuid())
+  enseigneId    String?
+  enseigne      Enseigne?    @relation(fields: [enseigneId], references: [id])
+
+  name          String
+  description   String?                      // <-- AJOUTER
+  equipements   String[]                     // <-- AJOUTER (tags simples, ex: ["wifi_1gbps","cafe_inclus"])
+  type          SpaceType
+  capacityMin   Int
+  capacityMax   Int
+  pricePerUnit  Decimal?     @db.Decimal(10, 2)   // <-- MODIFIER : devient optionnel (null si pricingUnit = activity)
+  pricingUnit   PricingUnit
+  openingHour   String       @default("08:00")    // <-- AJOUTER (format HH:mm)
+  closingHour   String       @default("22:00")    // <-- AJOUTER
+  isActive      Boolean      @default(true)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  reservations  Reservation[]
+  activities    SpaceActivityPricing[]        // <-- AJOUTER
+  blocks        SpaceBlock[]                  // <-- AJOUTER
+
+  @@map("coworking_spaces")
+}
+
+model SpaceActivityPricing {                  // <-- NOUVEAU MODÈLE
+  id        String       @id @default(uuid())
+  spaceId   String
+  space     CoworkingSpace @relation(fields: [spaceId], references: [id])
+  activity  String       // ex: "billard", "baby-foot", "ping-pong", "privatisation_soiree"
+  price     Decimal      @db.Decimal(10, 2)
+  unit      PricingUnit  @default(hour)
+  isActive  Boolean      @default(true)
+
+  @@map("space_activity_pricing")
+}
+
+model SpaceBlock {                            // <-- NOUVEAU MODÈLE
+  id          String            @id @default(uuid())
+  spaceId     String
+  space       CoworkingSpace    @relation(fields: [spaceId], references: [id])
+  reasonType  SpaceBlockReason
+  reasonNote  String?
+  startDate   DateTime          @db.Date
+  endDate     DateTime          @db.Date
+  startTime   String            @default("00:00")
+  endTime     String            @default("23:59")
+  createdById String
+  createdBy   User              @relation(fields: [createdById], references: [id])
+  createdAt   DateTime          @default(now())
+
+  @@index([spaceId, startDate, endDate])
+  @@map("space_blocks")
+}
+
+model Reservation {
+  id                 String             @id @default(uuid())
+  userId             String
+  user               User               @relation(fields: [userId], references: [id])
+  spaceId            String
+  space              CoworkingSpace     @relation(fields: [spaceId], references: [id])
+
+  startDate          DateTime           @db.Date
+  endDate            DateTime           @db.Date
+  startTime          String
+  endTime            String
+
+  durationType       DurationType?
+  halfDayPeriod      HalfDayPeriod?
+  numberOfDays       Int?
+  guestCount         Int?               @default(2)
+
+  status             ReservationStatus  @default(confirmed)
+  paymentMode        PaymentMode?
+  amountPaid         Decimal?           @db.Decimal(10, 2)
+
+  refundAmount       Decimal?           @db.Decimal(10, 2)
+  qrCode             String?            @unique  // Devient optionnel et sans default
+  checkedInAt        DateTime?
+  cancelledAt        DateTime?
+  cancellationReason String?            // Ajout du champ manquant
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  @@unique([spaceId, startDate, startTime])
+  @@index([spaceId, startDate, endDate])
+  @@map("reservations")
+}
+
+// ============================================================
+// Wallet (Tasnime)
+// ============================================================
+
+model WalletAuditLog {
+  id                String   @id @default(uuid())
+  userId            String
+  walletReferenceId String
+  action            String   // "balance" | "debit"
+  montant           Decimal? @db.Decimal(10, 2)
+  statusCode        Int
+  success           Boolean
+  errorCode         String?
+  createdAt         DateTime @default(now())
+
+  @@index([userId])
+  @@map("wallet_audit_log")
+}
+
+// ============================================================
+// Admin (Asma)
+// ============================================================
+
+model AdminAuditLog {
+  id         String   @id @default(uuid())
+  actorId    String
+  actor      User     @relation(fields: [actorId], references: [id])
+  action     String   // ex: "MEMBER_SUSPENDED", "WALLET_CREDITED", "ADMIN_ROLE_UPDATED",
+                       //     "TABLET_ACCOUNT_CREATED", "SPACE_BLOCKED", "RESERVATION_ADMIN_CANCELLED"
+  targetType String?  // ex: "User", "Reservation"
+  targetId   String?
+  reason     String
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  @@index([actorId])
+  @@index([action])
+  @@map("admin_audit_log")
+}
+model Ticket {
+  id          String       @id @default(uuid())
+  type        String       // "REFUND_FAILED" pour l'instant, extensible plus tard
+  orderId     String?
+  userId      String?
+  details     Json?
+  status      String       @default("OPEN") // "OPEN" | "RESOLVED"
+  createdAt   DateTime     @default(now())
+  resolvedAt  DateTime?
+
+  @@index([status])
+  @@map("tickets")
+}
+
+
+// ============================================================
+// Menus & Catalogues (§6 CDC fonctionnel)
+// ============================================================
+
+enum Allergene {
+  gluten
+  lactose
+  noix
+  oeufs
+  arachides
+  soja
+  crustaces
+  poisson
+  sesame
+  sulfites
+}
+
+model MenuItem {
+  id                 String     @id @default(uuid())
+  enseigneId         String
+  enseigne           Enseigne   @relation(fields: [enseigneId], references: [id])
+  categorieId        String
+  categorie          Category   @relation(fields: [categorieId], references: [id])
+  nom                String
+  description        String?
+  prix               Decimal    @db.Decimal(10, 2)
+  photoUrl           String?
+  allergenes         Allergene[]
+  disponible         Boolean    @default(true)   // toggle rupture — §6.2
+  deleted            Boolean    @default(false)  // soft delete — historique commandes préservé
+  ordre              Int        @default(0)      // drag & drop — §6.2
+  availabilityStart  String?                     // "07:00" — dispo horaire §6.2
+  availabilityEnd    String?                     // "11:00"
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+
+  orderItems         OrderItem[]
+  supplementGroups   MenuItemSupplementGroup[]
+  stockItem          StockItem?
+
+  @@index([enseigneId, categorieId])
+  @@map("menu_items")
+}
+
+model SupplementGroup {
+  id          String       @id @default(uuid())
+  nom         String       // ex: "Sauces"
+  minSelect   Int          @default(0)
+  maxSelect   Int          @default(1)
+  createdAt   DateTime     @default(now())
+
+  supplements Supplement[]
+  menuItems   MenuItemSupplementGroup[]
+
+  @@map("supplement_groups")
+}
+
+model Supplement {
+  id           String           @id @default(uuid())
+  groupId      String
+  group        SupplementGroup  @relation(fields: [groupId], references: [id])
+  nom          String
+  prix         Decimal          @db.Decimal(10, 2) @default(0)
+  maxQuantite  Int              @default(2)        // "max 2 par ingrédient" — §6.2
+  isActive     Boolean          @default(true)
+
+  @@map("supplements")
+}
+
+// Table de jointure : un article peut avoir plusieurs groupes de suppléments
+model MenuItemSupplementGroup {
+  menuItemId String
+  menuItem   MenuItem         @relation(fields: [menuItemId], references: [id])
+  groupId    String
+  group      SupplementGroup  @relation(fields: [groupId], references: [id])
+
+  @@id([menuItemId, groupId])
+  @@map("menu_item_supplement_groups")
+}
+
+// ============================================================
+// Stock (§5.2 / §13.1 CDC fonctionnel, StockModule CDC technique)
+// ============================================================
+
+model Supplier {
+  id        String   @id @default(uuid())
+  nom       String
+  type      String?  // ex: "produits frais", "boissons", "emballages"
+  contact   String?
+  createdAt DateTime @default(now())
+
+  stockItems StockItem[]
+  movements  StockMovement[]
+
+  @@map("suppliers")
+}
+
+model StockItem {
+  id              String   @id @default(uuid())
+  menuItemId      String   @unique
+  menuItem        MenuItem @relation(fields: [menuItemId], references: [id])
+  supplierId      String?
+  supplier        Supplier? @relation(fields: [supplierId], references: [id])
+
+  currentStock    Int      @default(0)
+  targetStock     Int      @default(0)   // stock cible "idéal"
+
+  // Seuils custom par article — si null, on retombe sur les seuils par catégorie/globaux
+  greenThresholdPct  Int?  // défaut 30
+  orangeThresholdPct Int?  // défaut 15
+
+  updatedAt       DateTime @updatedAt
+
+  movements       StockMovement[]
+
+  @@map("stock_items")
+}
+
+// Paramétrage du stock cible par jour de semaine (§5.2 : "dépendemment du jour
+// de la semaine / semaine du mois") — un multiplicateur appliqué au targetStock de base.
+model StockTargetOverride {
+  id            String   @id @default(uuid())
+  stockItemId   String
+  dayOfWeek     Int      // 0 = dimanche ... 6 = samedi
+  targetStock   Int
+
+  @@unique([stockItemId, dayOfWeek])
+  @@map("stock_target_overrides")
+}
+
+enum StockMovementType {
+  ENTREE_FOURNISSEUR
+  SORTIE_CONSOMMATION
+  AJUSTEMENT_MANUEL
+}
+
+model StockMovement {
+  id            String             @id @default(uuid())
+  stockItemId   String
+  stockItem     StockItem          @relation(fields: [stockItemId], references: [id])
+  type          StockMovementType
+  quantite      Int                // positif entrée, négatif sortie (ou toujours positif + type qui indique le sens)
+  supplierId    String?
+  supplier      Supplier?          @relation(fields: [supplierId], references: [id])
+  orderId       String?            // lien vers la commande qui a déclenché la sortie (traçabilité)
+  reason        String?
+  createdById   String?            // null si mouvement système (sortie auto liée à une commande)
+  createdAt     DateTime           @default(now())
+
+  @@index([stockItemId, createdAt])
+  @@map("stock_movements")
+}
+
+model Category {
+  id                  String     @id @default(uuid())
+  enseigneId          String
+  enseigne            Enseigne   @relation(fields: [enseigneId], references: [id])
+  nom                 String
+  ordre               Int        @default(0)
+  greenThresholdPct   Int?       // seuils par catégorie — fallback si l'article n'a pas de seuil propre
+  orangeThresholdPct  Int?
+  createdAt           DateTime   @default(now())
+
+  menuItems           MenuItem[]
+
+  @@unique([enseigneId, nom])
+  @@map("categories")
+}
